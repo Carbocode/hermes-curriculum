@@ -36,6 +36,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Settings
@@ -103,6 +105,47 @@ def _compose(compose_args: list[str]) -> int:
     return result.returncode
 
 
+class _Tee:
+    """Mirror writes to every wrapped stream."""
+
+    def __init__(self, *streams: object) -> None:
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)  # type: ignore[attr-defined]
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()  # type: ignore[attr-defined]
+
+
+def _command_log_path(command: str) -> Path:
+    """Return the predictable log file for a build-side command."""
+    logs_dir = Path.cwd() / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return logs_dir / f"curriculum-{command}-{stamp}-pid{os.getpid()}.log"
+
+
+@contextmanager
+def _tee_command_output(command: str):
+    """Mirror stdout/stderr to a durable log file while a command runs."""
+    log_path = _command_log_path(command)
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(f"# curriculum {command}\n")
+        log.write(f"# pid={os.getpid()}\n")
+        log.write(f"# started={datetime.now(timezone.utc).isoformat()}\n")
+        log.flush()
+        stdout, stderr = sys.stdout, sys.stderr
+        with redirect_stdout(_Tee(stdout, log)), redirect_stderr(_Tee(stderr, log)):
+            print(f"[curriculum] logging to {log_path}")
+            yield log_path
+        log.write(f"# finished={datetime.now(timezone.utc).isoformat()}\n")
+        log.flush()
+
+
 # --------------------------------------------------------------------------- #
 # Build-side command handlers (each lazy-imports curriculum.app.build).
 # --------------------------------------------------------------------------- #
@@ -129,7 +172,8 @@ def _cmd_ingest(args: argparse.Namespace, settings: Settings) -> int:
     from .app import build
 
     manifest = build.load_manifest(args.manifest)
-    _emit(build.ingest(manifest, settings))
+    with _tee_command_output("ingest"):
+        _emit(build.ingest(manifest, settings))
     return 0
 
 
@@ -137,7 +181,8 @@ def _cmd_link(args: argparse.Namespace, settings: Settings) -> int:
     """Link isolated concepts via embedding-guided edge repair."""
     from .app import build
 
-    _emit(build.link(settings, _course(args, settings)))
+    with _tee_command_output("link"):
+        _emit(build.link(settings, _course(args, settings)))
     return 0
 
 
@@ -145,7 +190,8 @@ def _cmd_questions(args: argparse.Namespace, settings: Settings) -> int:
     """Generate exam questions over the persisted graph (batched)."""
     from .app import build
 
-    _emit(build.generate_questions(settings, _course(args, settings)))
+    with _tee_command_output("questions"):
+        _emit(build.generate_questions(settings, _course(args, settings)))
     return 0
 
 
@@ -161,14 +207,15 @@ def _cmd_build(args: argparse.Namespace, settings: Settings) -> int:
 
     manifest = build.load_manifest(args.manifest)
     course = manifest["course"]
-    _emit({"stage": "ingest", "result": build.ingest(manifest, settings)})
-    _emit({"stage": "link", "result": build.link(settings, course)})
-    _emit(
-        {
-            "stage": "questions",
-            "result": build.generate_questions(settings, course),
-        }
-    )
+    with _tee_command_output("build"):
+        _emit({"stage": "ingest", "result": build.ingest(manifest, settings)})
+        _emit({"stage": "link", "result": build.link(settings, course)})
+        _emit(
+            {
+                "stage": "questions",
+                "result": build.generate_questions(settings, course),
+            }
+        )
     return 0
 
 
