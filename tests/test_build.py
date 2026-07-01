@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 from curriculum.app import build
+from curriculum.config import Settings
 from curriculum.domain.errors import ConfigError
 
 
@@ -161,6 +162,18 @@ class ModuleImportsOfflineTest(unittest.TestCase):
 
         for name in app.__all__:
             self.assertIs(getattr(app, name), getattr(build, name))
+
+
+class ProviderRequirementTest(unittest.TestCase):
+    def test_require_api_key_accepts_generic_key(self) -> None:
+        build._require_api_key(Settings(api_key="key"))
+
+    def test_require_api_key_mentions_generic_and_legacy_names(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            build._require_api_key(Settings(api_key=None))
+        message = str(ctx.exception)
+        self.assertIn("CURRICULUM_API_KEY", message)
+        self.assertIn("NOUS_API_KEY", message)
 
 
 if __name__ == "__main__":

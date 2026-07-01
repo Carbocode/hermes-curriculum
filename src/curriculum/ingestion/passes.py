@@ -14,7 +14,7 @@ Every pass takes its collaborators (an :class:`LlmProvider`, an
 fakes always yields the same result -- no module-level randomness, no wall
 clock, no network. In tests the collaborators are the deterministic
 :class:`curriculum.providers_fake.FakeLlm`/``FakeEmbedder``; in a real run they
-are the Nous-backed adapters (the only place paid inference happens).
+are the OpenAI-compatible adapters (the only place paid inference happens).
 
 Grounding (anti-fabrication)
 ----------------------------

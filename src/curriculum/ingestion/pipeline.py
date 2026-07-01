@@ -11,7 +11,7 @@ The composition is dependency-injected end to end: passes receive their
 providers, ``persist`` receives its repositories. Nothing here knows about a
 concrete adapter, so the whole pipeline is exercised in tests with the
 deterministic ``FakeLlm``/``FakeEmbedder`` and the in-memory repositories. A
-real run swaps in the Nous-backed providers and the Postgres/OKF repositories
+real run swaps in OpenAI-compatible providers and the Postgres/OKF repositories
 -- the only place paid inference and durable writes happen -- without any
 change to this module.
 """
@@ -125,7 +125,7 @@ def default_pipeline(llm: LlmProvider, embedder: EmbeddingProvider) -> Pipeline:
     earlier passes without real provenance.
 
     ``llm``/``embedder`` are injected providers: deterministic fakes in tests,
-    Nous-backed adapters in a real run.
+    OpenAI-compatible adapters in a real run.
     """
     return Pipeline(
         [

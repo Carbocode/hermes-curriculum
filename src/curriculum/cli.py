@@ -30,12 +30,16 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Settings
@@ -103,6 +107,94 @@ def _compose(compose_args: list[str]) -> int:
     return result.returncode
 
 
+class _Tee:
+    """Mirror writes to every wrapped stream immediately."""
+
+    def __init__(self, *streams: object) -> None:
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)  # type: ignore[attr-defined]
+            stream.flush()  # type: ignore[attr-defined]
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()  # type: ignore[attr-defined]
+
+
+def _command_log_path(command: str) -> Path:
+    """Return the predictable log file for a build-side command."""
+    logs_dir = Path.cwd() / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return logs_dir / f"curriculum-{command}-{stamp}-pid{os.getpid()}.log"
+
+
+@contextmanager
+def _tee_command_output(command: str):
+    """Mirror stdout/stderr to a durable log file while a command runs."""
+    log_path = _command_log_path(command)
+    with log_path.open("a", encoding="utf-8", buffering=1) as log:
+        log.write(f"# curriculum {command}\n")
+        log.write(f"# pid={os.getpid()}\n")
+        log.write(f"# started={datetime.now(timezone.utc).isoformat()}\n")
+        log.flush()
+        try:
+            stdout_fd = sys.stdout.fileno()
+            stderr_fd = sys.stderr.fileno()
+        except (AttributeError, io.UnsupportedOperation, ValueError):
+            stdout, stderr = sys.stdout, sys.stderr
+            with redirect_stdout(_Tee(stdout, log)), redirect_stderr(_Tee(stderr, log)):
+                print(f"[curriculum] logging to {log_path}")
+                yield log_path
+            log.write(f"# finished={datetime.now(timezone.utc).isoformat()}\n")
+            log.flush()
+            return
+
+        saved_stdout = os.dup(stdout_fd)
+        saved_stderr = os.dup(stderr_fd)
+        out_r, out_w = os.pipe()
+        err_r, err_w = os.pipe()
+        os.dup2(out_w, stdout_fd)
+        os.dup2(err_w, stderr_fd)
+        os.close(out_w)
+        os.close(err_w)
+
+        def _pump(read_fd: int) -> None:
+            with os.fdopen(read_fd, "rb", closefd=True) as reader:
+                while True:
+                    chunk = reader.read(8192)
+                    if not chunk:
+                        break
+                    log.write(chunk.decode("utf-8", errors="replace"))
+                    log.flush()
+
+        threads = [
+            threading.Thread(target=_pump, args=(out_r,), daemon=True),
+            threading.Thread(target=_pump, args=(err_r,), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            print(f"[curriculum] logging to {log_path}")
+            yield log_path
+        finally:
+            try:
+                sys.stdout.flush()
+            finally:
+                sys.stderr.flush()
+            os.dup2(saved_stdout, stdout_fd)
+            os.dup2(saved_stderr, stderr_fd)
+            os.close(saved_stdout)
+            os.close(saved_stderr)
+            for thread in threads:
+                thread.join(timeout=1)
+            log.write(f"# finished={datetime.now(timezone.utc).isoformat()}\n")
+            log.flush()
+
+
 # --------------------------------------------------------------------------- #
 # Build-side command handlers (each lazy-imports curriculum.app.build).
 # --------------------------------------------------------------------------- #
@@ -129,7 +221,8 @@ def _cmd_ingest(args: argparse.Namespace, settings: Settings) -> int:
     from .app import build
 
     manifest = build.load_manifest(args.manifest)
-    _emit(build.ingest(manifest, settings))
+    with _tee_command_output("ingest"):
+        _emit(build.ingest(manifest, settings))
     return 0
 
 
@@ -137,7 +230,8 @@ def _cmd_link(args: argparse.Namespace, settings: Settings) -> int:
     """Link isolated concepts via embedding-guided edge repair."""
     from .app import build
 
-    _emit(build.link(settings, _course(args, settings)))
+    with _tee_command_output("link"):
+        _emit(build.link(settings, _course(args, settings)))
     return 0
 
 
@@ -145,7 +239,8 @@ def _cmd_questions(args: argparse.Namespace, settings: Settings) -> int:
     """Generate exam questions over the persisted graph (batched)."""
     from .app import build
 
-    _emit(build.generate_questions(settings, _course(args, settings)))
+    with _tee_command_output("questions"):
+        _emit(build.generate_questions(settings, _course(args, settings)))
     return 0
 
 
@@ -161,14 +256,15 @@ def _cmd_build(args: argparse.Namespace, settings: Settings) -> int:
 
     manifest = build.load_manifest(args.manifest)
     course = manifest["course"]
-    _emit({"stage": "ingest", "result": build.ingest(manifest, settings)})
-    _emit({"stage": "link", "result": build.link(settings, course)})
-    _emit(
-        {
-            "stage": "questions",
-            "result": build.generate_questions(settings, course),
-        }
-    )
+    with _tee_command_output("build"):
+        _emit({"stage": "ingest", "result": build.ingest(manifest, settings)})
+        _emit({"stage": "link", "result": build.link(settings, course)})
+        _emit(
+            {
+                "stage": "questions",
+                "result": build.generate_questions(settings, course),
+            }
+        )
     return 0
 
 
@@ -203,9 +299,13 @@ def _register_argv(python: str, settings: Settings, key_value: str) -> list[str]
         "hermes", "mcp", "add", "curriculum",
         "--command", python,
         "--env",
-        f"NOUS_API_KEY={key_value}",
+        f"CURRICULUM_API_KEY={key_value}",
+        f"CURRICULUM_BASE_URL={settings.base_url}",
         f"CURRICULUM_DB_URL={settings.database_url}",
         f"CURRICULUM_OKF_PATH={bundle}",
+        f"CURRICULUM_INGEST_MODEL={settings.ingest_model}",
+        f"CURRICULUM_EMBED_MODEL={settings.embed_model}",
+        f"CURRICULUM_EMBED_DIM={settings.embedding_dim}",
         "--args", "-m", "curriculum.mcp.server",
     ]
 
@@ -214,14 +314,14 @@ def _render(argv: list[str]) -> str:
     """Render an argv as a copy-pasteable shell line, keeping the key a reference.
 
     Every token is shell-quoted so paths with spaces survive, EXCEPT the
-    ``NOUS_API_KEY`` assignment, which is emitted as ``NOUS_API_KEY="$NOUS_API_KEY"``
-    so the secret never lands in printed output (the user's shell expands it at
+    ``CURRICULUM_API_KEY`` assignment, which is emitted as
+    ``CURRICULUM_API_KEY="$CURRICULUM_API_KEY"`` so the secret never lands in
     paste time) while the line stays runnable.
     """
     parts: list[str] = []
     for token in argv:
-        if token.startswith("NOUS_API_KEY="):
-            parts.append('NOUS_API_KEY="$NOUS_API_KEY"')
+        if token.startswith("CURRICULUM_API_KEY="):
+            parts.append('CURRICULUM_API_KEY="$CURRICULUM_API_KEY"')
         else:
             parts.append(shlex.quote(token))
     return " ".join(parts)
@@ -244,7 +344,7 @@ def _cmd_mcp_register(args: argparse.Namespace, settings: Settings) -> int:
         return 0
     print(f"running: {printable}")
     result = subprocess.run(
-        _register_argv(python, settings, settings.nous_api_key or "")
+        _register_argv(python, settings, settings.api_key or "")
     )
     return result.returncode
 
@@ -288,11 +388,15 @@ def _check_db(settings: Settings) -> tuple[str, bool, str]:
     return ("database", True, settings.database_url)
 
 
-def _check_nous(settings: Settings) -> tuple[str, bool, str]:
-    """Is the Nous API key set (required by every inference-backed build stage)?"""
-    if settings.nous_api_key:
-        return ("NOUS_API_KEY", True, "set")
-    return ("NOUS_API_KEY", False, "not set (export NOUS_API_KEY)")
+def _check_api_key(settings: Settings) -> tuple[str, bool, str]:
+    """Is an OpenAI-compatible provider API key set?"""
+    if settings.api_key:
+        return ("CURRICULUM_API_KEY", True, "set")
+    return (
+        "CURRICULUM_API_KEY",
+        False,
+        "not set (export CURRICULUM_API_KEY; legacy NOUS_API_KEY also works)",
+    )
 
 
 def _check_bundle(settings: Settings) -> tuple[str, bool, str]:
@@ -317,7 +421,7 @@ def _cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     checks = [
         _check_docker(),
         _check_db(settings),
-        _check_nous(settings),
+        _check_api_key(settings),
         _check_bundle(settings),
     ]
     all_ok = True

@@ -8,15 +8,16 @@ it at your own plain-text course materials; it ingests them into a concept/edge 
 isolated concepts, generates grounded exam questions, and serves the result to a host
 (Hermes) over an MCP server exposing `next` / `explain` / `quiz` / `grade` / `state`.
 Everything here is generic: **no source materials and no secrets are committed** -- you
-supply both at runtime through `corpus.json` and the `NOUS_API_KEY` environment variable.
+supply both at runtime through `corpus.json` and `CURRICULUM_API_KEY` (or legacy `NOUS_API_KEY`).
 
 ## Prerequisites
 
 - **Docker + Docker Compose** -- runs the bundled Postgres 16 + pgvector database.
 - **uv** (https://docs.astral.sh/uv/) -- creates the virtualenv and installs the package.
 - **Python 3.11+** -- the package targets `>=3.11`.
-- **A Nous Research API key** -- every build stage (extraction, edge inference, linking,
-  question generation, embeddings) calls the Nous inference API. Exported as `NOUS_API_KEY`.
+- **An OpenAI-compatible provider API key** -- every build stage (extraction, edge inference, linking,
+  question generation, embeddings) calls a provider API. Export it as `CURRICULUM_API_KEY`;
+  legacy `NOUS_API_KEY` remains supported as a fallback.
 - **Your own plain-text course materials** -- e.g. text extracts of slides/notes. None ship
   with the repo.
 
@@ -45,22 +46,44 @@ bundle). It exits non-zero if anything is missing, so it doubles as a scriptable
 
 3. **Export your API key (and any optional overrides).**
    ```sh
-   export NOUS_API_KEY=...        # the only REQUIRED variable
+   export CURRICULUM_API_KEY=...  # the only REQUIRED variable
    ```
-   `NOUS_API_KEY` is the sole required setting; everything else has a working default.
+   `CURRICULUM_API_KEY` is the primary required setting; legacy `NOUS_API_KEY` also works. Everything else has a working default.
    All configuration (`curriculum.config.Settings`, loaded by `curriculum.config.load()`)
    comes from the environment:
 
    | Variable                  | Default                                                        | Meaning |
    |---------------------------|----------------------------------------------------------------|---------|
-   | `NOUS_API_KEY`            | *(unset -- REQUIRED)*                                          | Nous API key; read as `settings.nous_api_key`. Build stages fail fast without it. |
+   | `CURRICULUM_API_KEY`      | *(unset -- REQUIRED)*                                          | OpenAI-compatible provider API key; legacy `NOUS_API_KEY` fallback supported. Build stages fail fast without it. |
    | `CURRICULUM_DB_URL`       | `postgresql://curriculum:curriculum@localhost:5433/curriculum` | Postgres DSN (matches the docker-compose service). |
    | `CURRICULUM_OKF_PATH`     | `./bundle`                                                      | Directory of the OKF markdown content bundle (created on first ingest). |
    | `CURRICULUM_COURSE`       | `Cybersecurity`                                                | Default course for the `--course`-scoped commands (`status`, `link`, `questions`). |
-   | `NOUS_BASE_URL`           | `https://inference-api.nousresearch.com/v1`                    | Nous API base URL. |
+   | `CURRICULUM_BASE_URL`     | `https://inference-api.nousresearch.com/v1`                    | OpenAI-compatible provider base URL; legacy `NOUS_BASE_URL` fallback supported. |
    | `CURRICULUM_INGEST_MODEL` | `deepseek/deepseek-v4-flash`                                   | LLM for extraction, edge inference, linking, and question generation. |
    | `CURRICULUM_EMBED_MODEL`  | `google/gemini-embedding-2`                                    | Embedding model (3072-dim by default). |
    | `CURRICULUM_EMBED_DIM`    | `3072`                                                         | Embedding dimension. MUST match the `vector(N)` column in `schema/001_init.sql`. |
+
+
+   Example vendor overrides:
+   ```sh
+   # Nous/default-compatible setup
+   export CURRICULUM_API_KEY="$NOUS_API_KEY"
+   export CURRICULUM_BASE_URL="https://inference-api.nousresearch.com/v1"
+   export CURRICULUM_INGEST_MODEL="deepseek/deepseek-v4-flash"
+   export CURRICULUM_EMBED_MODEL="google/gemini-embedding-2"
+   export CURRICULUM_EMBED_DIM=3072
+
+   # NVIDIA NIM-style OpenAI-compatible setup. Check NVIDIA's current catalog
+   # for exact chat/embedding model ids and embedding dimensions.
+   export CURRICULUM_API_KEY="$NVIDIA_API_KEY"
+   export CURRICULUM_BASE_URL="https://integrate.api.nvidia.com/v1"
+   export CURRICULUM_INGEST_MODEL="<nvidia-chat-model>"
+   export CURRICULUM_EMBED_MODEL="<nvidia-embedding-model>"
+   export CURRICULUM_EMBED_DIM="<embedding-dimension>"
+   ```
+   `CURRICULUM_EMBED_DIM` MUST match both the provider embedding output dimension and
+   the `vector(N)` column in `schema/001_init.sql`; if you change dimensions, update
+   the schema and recreate/migrate the database.
 
 4. **Create your manifest and point it at your own materials.**
    ```sh
@@ -95,7 +118,7 @@ bundle). It exits non-zero if anything is missing, so it doubles as a scriptable
    .venv/bin/curriculum mcp-register
    ```
    Runs `hermes mcp add curriculum ...` when `hermes` is on PATH; otherwise prints the
-   exact command (with the key shown as `"$NOUS_API_KEY"`, never echoed) to run where
+   exact command (with the key shown as `"$CURRICULUM_API_KEY"`, never echoed) to run where
    Hermes lives. Hermes then launches the server via `curriculum serve`, which `execv`s
    `python -m curriculum.mcp.server` and speaks MCP over stdio.
 
@@ -147,8 +170,8 @@ the OKF bundle are removed, so the next `curriculum build` starts clean.
 - **`database ... unreachable` / connection refused** -- the DB is not up or not on :5433.
   Run `docker compose up -d db`, wait for the healthcheck, and re-check with
   `curriculum doctor`. If your Postgres is elsewhere, set `CURRICULUM_DB_URL`.
-- **`NOUS_API_KEY is not set`** -- every Nous-backed stage (ingest/link/questions) needs the
-  key. `export NOUS_API_KEY=...` in the same shell. `doctor` reports it as MISS.
+- **`CURRICULUM_API_KEY is not set`** -- every inference-backed stage (ingest/link/questions) needs an OpenAI-compatible provider key.
+  `export CURRICULUM_API_KEY=...` in the same shell; legacy `NOUS_API_KEY` is still accepted. `doctor` reports it as MISS.
 - **Embedding dimension mismatch** -- the schema declares `embedding vector(3072)`. If you
   switch `CURRICULUM_EMBED_MODEL` to a model of a different dimension (or set a different
   `CURRICULUM_EMBED_DIM`), edit the `vector(N)` in `schema/001_init.sql` to match and

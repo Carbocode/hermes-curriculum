@@ -1,6 +1,6 @@
 """Deterministic, dependency-free fake providers.
 
-These stand in for the Nous-backed :class:`EmbeddingProvider` and
+These stand in for the OpenAI-compatible :class:`EmbeddingProvider` and
 :class:`LlmProvider` adapters during tests and offline dry-runs. They exist so
 that exercising the ingestion / dedup / selection paths costs nothing and never
 touches the network: NO paid inference can happen behind a fake.

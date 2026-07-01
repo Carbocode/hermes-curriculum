@@ -1,7 +1,7 @@
 """External-service ports: embeddings and LLM completion.
 
 Kept deliberately tiny (Interface Segregation). Fake implementations are used in
-tests and offline runs; the Nous-backed implementations are the only place paid
+tests and offline runs; OpenAI-compatible implementations are the only place paid
 inference happens, so they are easy to keep out of the hot loop.
 """
 from __future__ import annotations

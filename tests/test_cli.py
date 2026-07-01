@@ -19,11 +19,16 @@ The load-bearing properties asserted here:
 from __future__ import annotations
 
 import io
+import json
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from curriculum import cli
+from curriculum.config import Settings
 
 
 class HelpAndUsageTest(unittest.TestCase):
@@ -70,7 +75,7 @@ class DoctorTest(unittest.TestCase):
         # Every probe is reported, each line marked OK or MISS.
         self.assertIn("docker", printed)
         self.assertIn("database", printed)
-        self.assertIn("nous_api_key", printed)
+        self.assertIn("curriculum_api_key", printed)
         self.assertTrue("ok" in printed or "miss" in printed)
 
     def test_doctor_returns_nonzero_when_a_check_misses(self) -> None:
@@ -82,6 +87,78 @@ class DoctorTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 code = cli.main(["doctor"])
         self.assertNotEqual(code, 0)
+
+
+class McpRegisterCommandTest(unittest.TestCase):
+    def test_register_command_uses_generic_provider_env_names(self) -> None:
+        settings = Settings(api_key="secret", base_url="https://vendor.test/v1")
+        argv = cli._register_argv("/python", settings, "secret")
+
+        self.assertIn("CURRICULUM_API_KEY=secret", argv)
+        self.assertIn("CURRICULUM_BASE_URL=https://vendor.test/v1", argv)
+        self.assertIn("CURRICULUM_INGEST_MODEL=deepseek/deepseek-v4-flash", argv)
+        self.assertIn("CURRICULUM_EMBED_MODEL=google/gemini-embedding-2", argv)
+        self.assertIn("CURRICULUM_EMBED_DIM=3072", argv)
+        self.assertNotIn("NOUS_API_KEY=secret", argv)
+
+    def test_render_keeps_generic_key_as_shell_reference(self) -> None:
+        rendered = cli._render(
+            [
+                "hermes",
+                "mcp",
+                "add",
+                "curriculum",
+                "--env",
+                "CURRICULUM_API_KEY=",
+            ]
+        )
+
+        self.assertIn('CURRICULUM_API_KEY="$CURRICULUM_API_KEY"', rendered)
+
+
+class BuildLoggingTest(unittest.TestCase):
+    def test_build_creates_a_durable_log_file(self) -> None:
+        from curriculum.app import build as build_mod
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus = root / "corpus.json"
+            corpus.write_text(
+                json.dumps(
+                    {
+                        "course": "Algoritmi e Strutture dati",
+                        "sources": [{"path": "materials/a.txt", "token": "a"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                with (
+                    mock.patch.object(
+                        build_mod,
+                        "load_manifest",
+                        return_value={"course": "Algoritmi e Strutture dati"},
+                    ),
+                    mock.patch.object(build_mod, "ingest", return_value={"concepts": 1}),
+                    mock.patch.object(build_mod, "link", return_value={"edges": 2}),
+                    mock.patch.object(
+                        build_mod, "generate_questions", return_value={"questions": 3}
+                    ),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    code = cli.main(["build", str(corpus)])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(code, 0)
+            logs = sorted((root / "logs").glob("curriculum-build-*.log"))
+            self.assertEqual(len(logs), 1)
+            text = logs[0].read_text(encoding="utf-8")
+            self.assertIn('"stage": "ingest"', text)
+            self.assertIn('"stage": "questions"', text)
+            self.assertIn("[curriculum] logging to", text)
 
 
 if __name__ == "__main__":
