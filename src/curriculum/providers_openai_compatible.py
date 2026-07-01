@@ -25,7 +25,7 @@ class OpenAICompatibleLlm(LlmProvider):
         api_key: str,
         base_url: str = "https://inference-api.nousresearch.com/v1",
         model: str = "deepseek/deepseek-v4-flash",
-        timeout: float = 120.0,
+        timeout: float = 300.0,
     ) -> None:
         self._key = api_key
         self._url = base_url.rstrip("/") + "/chat/completions"
@@ -97,7 +97,7 @@ class OpenAICompatibleEmbedder(EmbeddingProvider):
         base_url: str = "https://inference-api.nousresearch.com/v1",
         model: str = "google/gemini-embedding-2",
         dim: int = 3072,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
         batch: int = 64,
     ) -> None:
         self._key = api_key

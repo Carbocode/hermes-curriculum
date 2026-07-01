@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS concept (
     importance    real NOT NULL DEFAULT 0.5,
     source_refs   jsonb NOT NULL DEFAULT '[]',
     content_hash  text,                              -- sha256 of OKF content file (sync/staleness)
-    embedding     vector(3072),                      -- derived from content; refreshed on hash change (gemini-embedding-2)
+    embedding     vector(4096),                      -- derived from content; refreshed on hash change (nvidia/nv-embed-v1)
     status        text NOT NULL DEFAULT 'active',
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
