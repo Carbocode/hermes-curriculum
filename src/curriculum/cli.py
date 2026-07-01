@@ -30,12 +30,14 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,7 +108,7 @@ def _compose(compose_args: list[str]) -> int:
 
 
 class _Tee:
-    """Mirror writes to every wrapped stream."""
+    """Mirror writes to every wrapped stream immediately."""
 
     def __init__(self, *streams: object) -> None:
         self._streams = streams
@@ -114,6 +116,7 @@ class _Tee:
     def write(self, text: str) -> int:
         for stream in self._streams:
             stream.write(text)  # type: ignore[attr-defined]
+            stream.flush()  # type: ignore[attr-defined]
         return len(text)
 
     def flush(self) -> None:
@@ -133,17 +136,63 @@ def _command_log_path(command: str) -> Path:
 def _tee_command_output(command: str):
     """Mirror stdout/stderr to a durable log file while a command runs."""
     log_path = _command_log_path(command)
-    with log_path.open("a", encoding="utf-8") as log:
+    with log_path.open("a", encoding="utf-8", buffering=1) as log:
         log.write(f"# curriculum {command}\n")
         log.write(f"# pid={os.getpid()}\n")
         log.write(f"# started={datetime.now(timezone.utc).isoformat()}\n")
         log.flush()
-        stdout, stderr = sys.stdout, sys.stderr
-        with redirect_stdout(_Tee(stdout, log)), redirect_stderr(_Tee(stderr, log)):
+        try:
+            stdout_fd = sys.stdout.fileno()
+            stderr_fd = sys.stderr.fileno()
+        except (AttributeError, io.UnsupportedOperation, ValueError):
+            stdout, stderr = sys.stdout, sys.stderr
+            with redirect_stdout(_Tee(stdout, log)), redirect_stderr(_Tee(stderr, log)):
+                print(f"[curriculum] logging to {log_path}")
+                yield log_path
+            log.write(f"# finished={datetime.now(timezone.utc).isoformat()}\n")
+            log.flush()
+            return
+
+        saved_stdout = os.dup(stdout_fd)
+        saved_stderr = os.dup(stderr_fd)
+        out_r, out_w = os.pipe()
+        err_r, err_w = os.pipe()
+        os.dup2(out_w, stdout_fd)
+        os.dup2(err_w, stderr_fd)
+        os.close(out_w)
+        os.close(err_w)
+
+        def _pump(read_fd: int) -> None:
+            with os.fdopen(read_fd, "rb", closefd=True) as reader:
+                while True:
+                    chunk = reader.read(8192)
+                    if not chunk:
+                        break
+                    log.write(chunk.decode("utf-8", errors="replace"))
+                    log.flush()
+
+        threads = [
+            threading.Thread(target=_pump, args=(out_r,), daemon=True),
+            threading.Thread(target=_pump, args=(err_r,), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        try:
             print(f"[curriculum] logging to {log_path}")
             yield log_path
-        log.write(f"# finished={datetime.now(timezone.utc).isoformat()}\n")
-        log.flush()
+        finally:
+            try:
+                sys.stdout.flush()
+            finally:
+                sys.stderr.flush()
+            os.dup2(saved_stdout, stdout_fd)
+            os.dup2(saved_stderr, stderr_fd)
+            os.close(saved_stdout)
+            os.close(saved_stderr)
+            for thread in threads:
+                thread.join(timeout=1)
+            log.write(f"# finished={datetime.now(timezone.utc).isoformat()}\n")
+            log.flush()
 
 
 # --------------------------------------------------------------------------- #
